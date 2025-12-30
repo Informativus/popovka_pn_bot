@@ -29,7 +29,7 @@ type Bot struct {
 	SquadID         string
 }
 
-func NewBot(token string, paymentClient *payment.Client, remnawaveClient *remnawave.Client, db *gorm.DB) (*Bot, error) {
+func NewBot(token string, paymentClient *payment.Client, remnawaveClient *remnawave.Client, db *gorm.DB, squadID string) (*Bot, error) {
 	tgBot, err := telego.NewBot(token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bot: %w", err)
@@ -41,6 +41,7 @@ func NewBot(token string, paymentClient *payment.Client, remnawaveClient *remnaw
 		RemnawaveClient: remnawaveClient,
 		DB:              db,
 		UserStates:      make(map[int64]string),
+		SquadID:         squadID,
 	}, nil
 }
 
@@ -114,10 +115,7 @@ func (b *Bot) Start() {
 		callback := update.CallbackQuery
 		keyboard := tu.InlineKeyboard(
 			tu.InlineKeyboardRow(
-				tu.InlineKeyboardButton("1 месяц - 299₽").WithCallbackData("buy_1m"),
-			),
-			tu.InlineKeyboardRow(
-				tu.InlineKeyboardButton("3 месяца - 799₽").WithCallbackData("buy_3m"),
+				tu.InlineKeyboardButton("🚀 VPN 30 дней - 255₽").WithCallbackData("buy_subscription_balance"),
 			),
 			tu.InlineKeyboardRow(
 				tu.InlineKeyboardButton("« Назад").WithCallbackData("start_back"),
@@ -126,63 +124,121 @@ func (b *Bot) Start() {
 
 		_, _ = ctx.Bot().SendMessage(ctx.Context(), tu.Message(
 			tu.ID(callback.From.ID),
-			"📊 Выберите подходящий тарифный план:",
+			"📊 Тарифный план:\nVPN на 30 дней за 255 рублей.\nОплата списывается с внутреннего баланса.",
 		).WithReplyMarkup(keyboard))
 		_ = ctx.Bot().AnswerCallbackQuery(ctx.Context(), tu.CallbackQuery(callback.ID))
 		return nil
 	}, th.CallbackDataEqual("buy_vpn"))
 
-	// Callback for buying 1 month VPN
+	// Callback for buying subscription from balance
 	handler.Handle(func(ctx *th.Context, update telego.Update) error {
 		callback := update.CallbackQuery
 		telegramID := callback.From.ID
 
-		metadata := map[string]string{
-			"telegram_id": strconv.FormatInt(telegramID, 10),
-			"duration":    "30d",
-		}
-
-		paymentResp, err := b.PaymentClient.CreatePayment("299.00", "RUB", "VPN Subscription - 1 month", "https://t.me/your_bot_name", metadata)
-		if err != nil {
-			log.Printf("Failed to create payment: %v", err)
-			_, _ = ctx.Bot().SendMessage(ctx.Context(), tu.Message(tu.ID(telegramID), "❌ Ошибка при создании платежа. Попробуйте позже."))
+		// Get User
+		var user models.User
+		if err := b.DB.Where("telegram_id = ?", telegramID).First(&user).Error; err != nil {
+			_, _ = ctx.Bot().SendMessage(ctx.Context(), tu.Message(tu.ID(telegramID), "❌ Ошибка: пользователь не найден."))
 			return nil
 		}
 
-		_, _ = ctx.Bot().SendMessage(ctx.Context(), tu.Message(
-			tu.ID(telegramID),
-			fmt.Sprintf("💳 Оплата создана! Ссылка для оплаты:\n%s", paymentResp.Confirmation.ConfirmationURL),
-		))
+		price := 255.0
+		durationDays := 30
 
-		_ = ctx.Bot().AnswerCallbackQuery(ctx.Context(), tu.CallbackQuery(callback.ID))
-		return nil
-	}, th.CallbackDataEqual("buy_1m"))
-
-	// Callback for buying 3 months VPN
-	handler.Handle(func(ctx *th.Context, update telego.Update) error {
-		callback := update.CallbackQuery
-		telegramID := callback.From.ID
-
-		metadata := map[string]string{
-			"telegram_id": strconv.FormatInt(telegramID, 10),
-			"duration":    "90d",
-		}
-
-		paymentResp, err := b.PaymentClient.CreatePayment("799.00", "RUB", "VPN Subscription - 3 months", "https://t.me/your_bot_name", metadata)
-		if err != nil {
-			log.Printf("Failed to create payment: %v", err)
-			_, _ = ctx.Bot().SendMessage(ctx.Context(), tu.Message(tu.ID(telegramID), "❌ Ошибка при создании платежа. Попробуйте позже."))
+		// Check Balance
+		if user.Balance < price {
+			keyboard := tu.InlineKeyboard(
+				tu.InlineKeyboardRow(
+					tu.InlineKeyboardButton("💰 Пополнить баланс").WithCallbackData("topup_balance"),
+				),
+				tu.InlineKeyboardRow(
+					tu.InlineKeyboardButton("« Назад").WithCallbackData("buy_vpn"),
+				),
+			)
+			msg := fmt.Sprintf("❌ Недостаточно средств.\nВаш баланс: %.2f₽\nСтоимость: %.2f₽", user.Balance, price)
+			_, _ = ctx.Bot().SendMessage(ctx.Context(), tu.Message(tu.ID(telegramID), msg).WithReplyMarkup(keyboard))
+			_ = ctx.Bot().AnswerCallbackQuery(ctx.Context(), tu.CallbackQuery(callback.ID))
 			return nil
 		}
 
-		_, _ = ctx.Bot().SendMessage(ctx.Context(), tu.Message(
-			tu.ID(telegramID),
-			fmt.Sprintf("💳 Оплата создана! Ссылка для оплаты:\n%s", paymentResp.Confirmation.ConfirmationURL),
-		))
+		// Process Purchase
+		// 1. Deduct Balance
+		user.Balance -= price
+		if err := b.DB.Save(&user).Error; err != nil {
+			log.Printf("Failed to update balance: %v", err)
+			_, _ = ctx.Bot().SendMessage(ctx.Context(), tu.Message(tu.ID(telegramID), "❌ Ошибка при списании средств."))
+			return nil
+		}
 
+		// 2. Activate/Extend Subscription
+		var sub models.Subscription
+		dbResult := b.DB.Where("user_id = ?", user.ID).First(&sub)
+
+		var vpnLink string
+		var expireDate time.Time
+
+		if dbResult.Error == gorm.ErrRecordNotFound {
+			// New Subscription
+			rwUser, err := b.RemnawaveClient.CreateUser(telegramID, fmt.Sprintf("user_%d", telegramID), durationDays, b.SquadID)
+			if err != nil {
+				// Rollback balance (simple manual rollback)
+				user.Balance += price
+				b.DB.Save(&user)
+				log.Printf("Failed to create Remnawave user: %v", err)
+				_, _ = ctx.Bot().SendMessage(ctx.Context(), tu.Message(tu.ID(telegramID), "❌ Ошибка при активации VPN. Средства возвращены."))
+				return nil
+			}
+
+			vpnLink = rwUser.SubscriptionURL
+			expireDate = time.Now().Add(time.Duration(durationDays) * 24 * time.Hour)
+
+			newSub := models.Subscription{
+				UserID:          user.ID,
+				RemnawaveID:     rwUser.UUID,
+				SubscriptionURL: rwUser.SubscriptionURL,
+				ExpirationDate:  expireDate,
+				PlanType:        "standard",
+			}
+			b.DB.Create(&newSub)
+
+		} else {
+			// Extend Subscription
+			if err := b.RemnawaveClient.ExtendSubscription(sub.RemnawaveID, durationDays); err != nil {
+				// Rollback
+				user.Balance += price
+				b.DB.Save(&user)
+				log.Printf("Failed to extend Remnawave user: %v", err)
+				_, _ = ctx.Bot().SendMessage(ctx.Context(), tu.Message(tu.ID(telegramID), "❌ Ошибка при продлении VPN. Средства возвращены."))
+				return nil
+			}
+
+			// Calculate new expiry
+			if sub.ExpirationDate.Before(time.Now()) {
+				expireDate = time.Now().Add(time.Duration(durationDays) * 24 * time.Hour)
+			} else {
+				expireDate = sub.ExpirationDate.Add(time.Duration(durationDays) * 24 * time.Hour)
+			}
+
+			sub.ExpirationDate = expireDate
+			b.DB.Save(&sub)
+
+			// Try get link if missing
+			if sub.SubscriptionURL == "" {
+				if rwUser, err := b.RemnawaveClient.GetUser(sub.RemnawaveID); err == nil {
+					sub.SubscriptionURL = rwUser.SubscriptionURL
+					b.DB.Save(&sub)
+				}
+			}
+			vpnLink = sub.SubscriptionURL
+		}
+
+		// Success Message
+		msg := fmt.Sprintf("✅ Подписка активирована!\n\n📅 Действует до: %s\n\n🔗 *Ссылка на VPN:*\n%s", expireDate.Format("02.01.2006"), vpnLink)
+		_, _ = ctx.Bot().SendMessage(ctx.Context(), tu.Message(tu.ID(telegramID), msg).WithParseMode(telego.ModeMarkdown))
 		_ = ctx.Bot().AnswerCallbackQuery(ctx.Context(), tu.CallbackQuery(callback.ID))
 		return nil
-	}, th.CallbackDataEqual("buy_3m"))
+
+	}, th.CallbackDataEqual("buy_subscription_balance"))
 
 	// Callback for Profile
 	handler.Handle(func(ctx *th.Context, update telego.Update) error {

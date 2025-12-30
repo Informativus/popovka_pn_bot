@@ -37,7 +37,7 @@ func main() {
 	paymentClient := payment.NewClient(cfg.YookassaShopID, cfg.YookassaKey)
 
 	// Initialize Bot
-	tgBot, err := bot.NewBot(cfg.BotToken, paymentClient, remnawaveClient, db)
+	tgBot, err := bot.NewBot(cfg.BotToken, paymentClient, remnawaveClient, db, cfg.RemnawaveSquadID)
 	if err != nil {
 		log.Fatalf("Could not initialize bot: %v", err)
 	}
