@@ -22,6 +22,7 @@ type Config struct {
 	RemnawaveSquadID string
 	YookassaShopID   string
 	YookassaKey      string
+	AllowedYooIp     []string
 }
 
 func LoadConfig() *Config {
@@ -44,6 +45,14 @@ func LoadConfig() *Config {
 		RemnawaveSquadID: getEnv("REMNAWAVE_SQUAD_ID", ""),
 		YookassaShopID:   getEnv("YOOKASSA_SHOP_ID", ""),
 		YookassaKey:      getEnv("YOOKASSA_SECRET_KEY", ""),
+		AllowedYooIp: []string{
+			"185.71.76.0/27",
+			"185.71.77.0/27",
+			"77.75.153.0/25",
+			"77.75.156.224/28",
+			"77.75.154.128/25",
+			"2a02:5180::/32",
+		},
 	}
 }
 

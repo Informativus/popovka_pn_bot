@@ -5,12 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"popovka-bot/internal/config"
 	"popovka-bot/internal/models"
 	"popovka-bot/internal/remnawave"
+	"popovka-bot/internal/utils"
 
 	"github.com/mymmrac/telego"
 	tu "github.com/mymmrac/telego/telegoutil"
@@ -22,18 +26,41 @@ type Handler struct {
 	DB              *gorm.DB
 	Bot             *telego.Bot
 	SquadID         string
+	Config          *config.Config
 }
 
-func NewHandler(remnawaveClient *remnawave.Client, db *gorm.DB, bot *telego.Bot, squadID string) *Handler {
+func NewHandler(remnawaveClient *remnawave.Client, db *gorm.DB, bot *telego.Bot, squadID string, cfg *config.Config) *Handler {
 	return &Handler{
 		RemnawaveClient: remnawaveClient,
 		DB:              db,
 		Bot:             bot,
 		SquadID:         squadID,
+		Config:          cfg,
 	}
 }
 
 func (h *Handler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
+	// IP Security Check
+	clientIP := r.RemoteAddr
+	// If behind proxy (Nginx, etc), header might look like "client_ip, proxy_ip"
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		ips := strings.Split(xff, ",")
+		if len(ips) > 0 {
+			clientIP = strings.TrimSpace(ips[0])
+		}
+	} else {
+		// RemoteAddr contains port, stripe it
+		if strings.Contains(clientIP, ":") {
+			clientIP, _, _ = net.SplitHostPort(clientIP)
+		}
+	}
+
+	if !utils.IsAllowedIP(clientIP, h.Config.AllowedYooIp) {
+		log.Printf("Webhook rejected: IP %s not in whitelist", clientIP)
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return

@@ -92,11 +92,14 @@ func (b *Bot) Start() {
 
 		keyboard := tu.InlineKeyboard(
 			tu.InlineKeyboardRow(
-				tu.InlineKeyboardButton("💳 Купить VPN").WithCallbackData("buy_vpn"),
+				tu.InlineKeyboardButton("👤 Личный кабинет").WithCallbackData("profile"),
+				tu.InlineKeyboardButton("💰 Пополнить баланс").WithCallbackData("topup_balance"),
 			),
 			tu.InlineKeyboardRow(
-				tu.InlineKeyboardButton("👤 Мой профиль").WithCallbackData("profile"),
-				tu.InlineKeyboardButton("🤝 Пригласить друга").WithCallbackData("invite_friend"),
+				tu.InlineKeyboardButton("🚀 Купить VPN (255₽)").WithCallbackData("buy_subscription_balance"),
+			),
+			tu.InlineKeyboardRow(
+				tu.InlineKeyboardButton("🤝 Партнерская программа").WithCallbackData("invite_friend"),
 			),
 			tu.InlineKeyboardRow(
 				tu.InlineKeyboardButton("📖 Инструкция").WithCallbackData("instruction"),
@@ -266,7 +269,7 @@ func (b *Bot) Start() {
 			}
 		}
 
-		msg := fmt.Sprintf("👤 *Твой профиль:*\n\n🔹 ID: `%d`\n🔹 Баланс: %.2f₽\n🔹 Статус: %s\n🔹 Действует до: %s", telegramID, user.Balance, status, expiry)
+		msg := fmt.Sprintf("👤 *Личный кабинет:*\n\n🔹 ID: `%d`\n🔹 Баланс: %.2f₽\n🔹 Статус: %s\n🔹 Действует до: %s", telegramID, user.Balance, status, expiry)
 
 		// Add VPN link if subscription is active
 		if err == nil {
@@ -348,7 +351,7 @@ func (b *Bot) Start() {
 		}
 		refLink := fmt.Sprintf("https://t.me/%s?start=%s", botUsername, user.ReferralCode)
 
-		msg := fmt.Sprintf("🤝 *Реферальная программа*\n\n"+
+		msg := fmt.Sprintf("🤝 *Партнерская программа*\n\n"+
 			"Приглашай друзей и получай бонусы!\n\n"+
 			"👥 Приглашено: %d\n"+
 			"💰 Заработано: %.2f₽\n\n"+
@@ -371,11 +374,12 @@ func (b *Bot) Start() {
 		callback := update.CallbackQuery
 		keyboard := tu.InlineKeyboard(
 			tu.InlineKeyboardRow(
-				tu.InlineKeyboardButton("💳 Купить VPN").WithCallbackData("buy_vpn"),
+				tu.InlineKeyboardButton("👤 Личный кабинет").WithCallbackData("profile"),
+				tu.InlineKeyboardButton("💰 Пополнить баланс").WithCallbackData("topup_balance"),
 			),
 			tu.InlineKeyboardRow(
-				tu.InlineKeyboardButton("👤 Мой профиль").WithCallbackData("profile"),
-				tu.InlineKeyboardButton("📖 Инструкция").WithCallbackData("instruction"),
+				tu.InlineKeyboardButton("🚀 Купить VPN").WithCallbackData("buy_subscription_balance"),
+				tu.InlineKeyboardButton("🤝 Партнерам").WithCallbackData("invite_friend"),
 			),
 		)
 

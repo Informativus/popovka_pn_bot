@@ -43,7 +43,7 @@ func main() {
 	}
 
 	// Initialize Handler
-	paymentHandler := payment.NewHandler(remnawaveClient, db, tgBot.Instance, cfg.RemnawaveSquadID)
+	paymentHandler := payment.NewHandler(remnawaveClient, db, tgBot.Instance, cfg.RemnawaveSquadID, cfg)
 
 	// Start Webhook Server
 	go func() {
