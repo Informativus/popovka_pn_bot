@@ -5,6 +5,7 @@ import (
 
 	"popovka-bot/internal/config"
 	"popovka-bot/internal/database"
+	"popovka-bot/internal/remnawave"
 )
 
 func main() {
@@ -24,6 +25,10 @@ func main() {
 		log.Fatalf("Could not connect to redis: %v", err)
 	}
 	_ = rdb // Suppress unused var error for now
+
+	// Initialize Remnawave Client
+	remnawaveClient := remnawave.NewClient(cfg.RemnawaveURL, cfg.RemnawaveKey)
+	log.Printf("Initialized Remnawave Client with URL: %s", remnawaveClient.BaseURL)
 
 	log.Println("Service started successfully")
 
