@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
 	"popovka-bot/internal/models"
@@ -47,12 +48,51 @@ func (b *Bot) Start() {
 	// /start command
 	handler.Handle(func(ctx *th.Context, update telego.Update) error {
 		message := update.Message
+		telegramID := message.From.ID
+
+		// Parse arguments manually
+		args := ""
+		if parts := strings.Split(message.Text, " "); len(parts) > 1 {
+			args = parts[1]
+		}
+
+		// Find or Create User
+		var user models.User
+		if err := b.DB.FirstOrCreate(&user, models.User{TelegramID: telegramID}).Error; err != nil {
+			log.Printf("Failed to get/create user: %v", err)
+		}
+
+		// Generate Referral Code if missing
+		if user.ReferralCode == "" {
+			user.ReferralCode = fmt.Sprintf("ref_%d", telegramID)
+			user.Username = message.From.Username // Update username too
+			if err := b.DB.Save(&user).Error; err != nil {
+				log.Printf("Failed to update user referral code: %v", err)
+			}
+		}
+
+		// Process Referral (only if new user or no referrer set)
+		if args != "" && user.ReferrerID == nil && args != user.ReferralCode {
+			var referrer models.User
+			if err := b.DB.Where("referral_code = ?", args).First(&referrer).Error; err == nil {
+				// Referrer found
+				user.ReferrerID = &referrer.ID
+				if err := b.DB.Save(&user).Error; err != nil {
+					log.Printf("Failed to save referrer: %v", err)
+				}
+				log.Printf("User %d invited by %d", telegramID, referrer.TelegramID)
+			}
+		}
+
 		keyboard := tu.InlineKeyboard(
 			tu.InlineKeyboardRow(
 				tu.InlineKeyboardButton("💳 Купить VPN").WithCallbackData("buy_vpn"),
 			),
 			tu.InlineKeyboardRow(
 				tu.InlineKeyboardButton("👤 Мой профиль").WithCallbackData("profile"),
+				tu.InlineKeyboardButton("🤝 Пригласить друга").WithCallbackData("invite_friend"),
+			),
+			tu.InlineKeyboardRow(
 				tu.InlineKeyboardButton("📖 Инструкция").WithCallbackData("instruction"),
 			),
 		)
@@ -209,6 +249,55 @@ func (b *Bot) Start() {
 		_ = ctx.Bot().AnswerCallbackQuery(ctx.Context(), tu.CallbackQuery(callback.ID))
 		return nil
 	}, th.CallbackDataEqual("instruction"))
+
+	// Callback for Invite Friend
+	handler.Handle(func(ctx *th.Context, update telego.Update) error {
+		callback := update.CallbackQuery
+		telegramID := callback.From.ID
+
+		var user models.User
+		if err := b.DB.Where("telegram_id = ?", telegramID).First(&user).Error; err != nil {
+			_, _ = ctx.Bot().SendMessage(ctx.Context(), tu.Message(tu.ID(telegramID), "❌ Ошибка: пользователь не найден."))
+			_ = ctx.Bot().AnswerCallbackQuery(ctx.Context(), tu.CallbackQuery(callback.ID))
+			return nil
+		}
+
+		// Ensure referral code exists
+		if user.ReferralCode == "" {
+			user.ReferralCode = fmt.Sprintf("ref_%d", telegramID)
+			b.DB.Save(&user)
+		}
+
+		// Get Stats
+		var invitedCount int64
+		b.DB.Model(&models.User{}).Where("referrer_id = ?", user.ID).Count(&invitedCount)
+
+		var totalEarned float64
+		b.DB.Model(&models.ReferralTransaction{}).Where("referrer_id = ?", user.ID).Select("COALESCE(SUM(amount), 0)").Scan(&totalEarned)
+
+		botUsername := "popovka_bot" // TODO: Get from config or context
+		if info, err := b.Instance.GetMe(ctx.Context()); err == nil {
+			botUsername = info.Username
+		}
+		refLink := fmt.Sprintf("https://t.me/%s?start=%s", botUsername, user.ReferralCode)
+
+		msg := fmt.Sprintf("🤝 *Реферальная программа*\n\n"+
+			"Приглашай друзей и получай бонусы!\n\n"+
+			"👥 Приглашено: %d\n"+
+			"💰 Заработано: %.2f₽\n\n"+
+			"🔗 *Твоя ссылка:*\n`%s`", invitedCount, totalEarned, refLink)
+
+		// Keyboard with Back button
+		keyboard := tu.InlineKeyboard(
+			tu.InlineKeyboardRow(
+				tu.InlineKeyboardButton("« Назад").WithCallbackData("start_back"),
+			),
+		)
+
+		_, _ = ctx.Bot().SendMessage(ctx.Context(), tu.Message(tu.ID(telegramID), msg).WithParseMode(telego.ModeMarkdown).WithReplyMarkup(keyboard))
+		_ = ctx.Bot().AnswerCallbackQuery(ctx.Context(), tu.CallbackQuery(callback.ID))
+		return nil
+	}, th.CallbackDataEqual("invite_friend"))
 
 	// Callback for Back to Start
 	handler.Handle(func(ctx *th.Context, update telego.Update) error {
