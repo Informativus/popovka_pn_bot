@@ -6,6 +6,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"popovka-bot/internal/models"
@@ -23,6 +24,9 @@ type Bot struct {
 	PaymentClient   *payment.Client
 	RemnawaveClient *remnawave.Client
 	DB              *gorm.DB
+	UserStates      map[int64]string
+	StatesMu        sync.RWMutex
+	SquadID         string
 }
 
 func NewBot(token string, paymentClient *payment.Client, remnawaveClient *remnawave.Client, db *gorm.DB) (*Bot, error) {
@@ -36,6 +40,7 @@ func NewBot(token string, paymentClient *payment.Client, remnawaveClient *remnaw
 		PaymentClient:   paymentClient,
 		RemnawaveClient: remnawaveClient,
 		DB:              db,
+		UserStates:      make(map[int64]string),
 	}, nil
 }
 
@@ -205,7 +210,7 @@ func (b *Bot) Start() {
 			}
 		}
 
-		msg := fmt.Sprintf("👤 *Твой профиль:*\n\n🔹 ID: `%d`\n🔹 Статус: %s\n🔹 Действует до: %s", telegramID, status, expiry)
+		msg := fmt.Sprintf("👤 *Твой профиль:*\n\n🔹 ID: `%d`\n🔹 Баланс: %.2f₽\n🔹 Статус: %s\n🔹 Действует до: %s", telegramID, user.Balance, status, expiry)
 
 		// Add VPN link if subscription is active
 		if err == nil {
@@ -228,7 +233,13 @@ func (b *Bot) Start() {
 			}
 		}
 
-		_, _ = ctx.Bot().SendMessage(ctx.Context(), tu.Message(tu.ID(telegramID), msg).WithParseMode(telego.ModeMarkdown))
+		keyboard := tu.InlineKeyboard(
+			tu.InlineKeyboardRow(
+				tu.InlineKeyboardButton("💰 Пополнить баланс").WithCallbackData("topup_balance"),
+			),
+		)
+
+		_, _ = ctx.Bot().SendMessage(ctx.Context(), tu.Message(tu.ID(telegramID), msg).WithParseMode(telego.ModeMarkdown).WithReplyMarkup(keyboard))
 		_ = ctx.Bot().AnswerCallbackQuery(ctx.Context(), tu.CallbackQuery(callback.ID))
 		return nil
 	}, th.CallbackDataEqual("profile"))
@@ -319,6 +330,64 @@ func (b *Bot) Start() {
 		_ = ctx.Bot().AnswerCallbackQuery(ctx.Context(), tu.CallbackQuery(callback.ID))
 		return nil
 	}, th.CallbackDataEqual("start_back"))
+
+	// Callback for Top Up Balance Request
+	handler.Handle(func(ctx *th.Context, update telego.Update) error {
+		telegramID := update.CallbackQuery.From.ID
+
+		b.StatesMu.Lock()
+		b.UserStates[telegramID] = "WAITING_TOPUP_AMOUNT"
+		b.StatesMu.Unlock()
+
+		_, _ = ctx.Bot().SendMessage(ctx.Context(), tu.Message(tu.ID(telegramID), "💰 Введите сумму пополнения (минимум 100₽):"))
+		_ = ctx.Bot().AnswerCallbackQuery(ctx.Context(), tu.CallbackQuery(update.CallbackQuery.ID))
+		return nil
+	}, th.CallbackDataEqual("topup_balance"))
+
+	// Handle Text Input (for Top Up)
+	handler.Handle(func(ctx *th.Context, update telego.Update) error {
+		telegramID := update.Message.From.ID
+		text := update.Message.Text
+
+		b.StatesMu.RLock()
+		state, ok := b.UserStates[telegramID]
+		b.StatesMu.RUnlock()
+
+		if !ok || state != "WAITING_TOPUP_AMOUNT" {
+			return nil // Pass to next handler if any
+		}
+
+		// Process Amount
+		amount, err := strconv.ParseFloat(text, 64)
+		if err != nil || amount < 100 {
+			_, _ = ctx.Bot().SendMessage(ctx.Context(), tu.Message(tu.ID(telegramID), "❌ Некорректная сумма. Введите число не меньше 100."))
+			return nil
+		}
+
+		// Create Payment
+		metadata := map[string]string{
+			"telegram_id": strconv.FormatInt(telegramID, 10),
+			"type":        "balance_topup",
+		}
+
+		paymentResp, err := b.PaymentClient.CreatePayment(fmt.Sprintf("%.2f", amount), "RUB", "Пополнение баланса", "https://t.me/your_bot_name", metadata)
+		if err != nil {
+			log.Printf("Failed to create topup payment: %v", err)
+			_, _ = ctx.Bot().SendMessage(ctx.Context(), tu.Message(tu.ID(telegramID), "❌ Ошибка при создании платежа."))
+		} else {
+			_, _ = ctx.Bot().SendMessage(ctx.Context(), tu.Message(
+				tu.ID(telegramID),
+				fmt.Sprintf("💳 Ссылка для пополнения на %.2f₽:\n%s", amount, paymentResp.Confirmation.ConfirmationURL),
+			))
+		}
+
+		// Reset State
+		b.StatesMu.Lock()
+		delete(b.UserStates, telegramID)
+		b.StatesMu.Unlock()
+
+		return nil
+	}, th.AnyMessageWithText())
 
 	handler.Start()
 }

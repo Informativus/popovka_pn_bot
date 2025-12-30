@@ -87,6 +87,61 @@ func (h *Handler) processSuccess(obj WebhookObject) error {
 		return fmt.Errorf("failed to find/create user: %w", err)
 	}
 
+	paymentType := obj.Metadata["type"]
+	if paymentType == "balance_topup" {
+		// Handle Balance Top-up
+		amountVal, _ := strconv.ParseFloat(obj.Amount.Value, 64)
+
+		// Update User Balance
+		user.Balance += amountVal
+		if err := h.DB.Save(&user).Error; err != nil {
+			log.Printf("Failed to update user balance: %v", err)
+		}
+
+		// Referral Bonus Logic (15%)
+		if user.ReferrerID != nil {
+			bonusAmount := amountVal * 0.15
+			if bonusAmount > 0 {
+				var referrer models.User
+				if err := h.DB.First(&referrer, *user.ReferrerID).Error; err == nil {
+					referrer.Balance += bonusAmount
+					h.DB.Save(&referrer)
+
+					// Record Transaction
+					h.DB.Create(&models.ReferralTransaction{
+						ReferrerID:    referrer.ID,
+						InvitedUserID: user.ID,
+						Amount:        bonusAmount,
+						CreatedAt:     time.Now(),
+					})
+
+					_, _ = h.Bot.SendMessage(context.Background(), tu.Message(
+						tu.ID(referrer.TelegramID),
+						fmt.Sprintf("💰 Вам начислен реферальный бонус: %.2f₽ за пополнение друга!", bonusAmount),
+					))
+				}
+			}
+		}
+
+		_, _ = h.Bot.SendMessage(context.Background(), tu.Message(
+			tu.ID(telegramID),
+			fmt.Sprintf("✅ Баланс успешно пополнен на %.2f₽\nТекущий баланс: %.2f₽", amountVal, user.Balance),
+		))
+
+		// Save Payment Record
+		payment := models.Payment{
+			UserID:     user.ID,
+			Amount:     amountVal,
+			Status:     "succeeded",
+			Type:       "balance_topup",
+			YooKassaID: obj.ID,
+		}
+		h.DB.Create(&payment)
+
+		return nil
+	}
+
+	// Legacy/Direct Subscription Logic
 	var rwID string
 	var configLink string // Store subscription URL
 
@@ -160,6 +215,7 @@ func (h *Handler) processSuccess(obj WebhookObject) error {
 		UserID:     user.ID,
 		Amount:     amountVal,
 		Status:     "succeeded",
+		Type:       "subscription",
 		YooKassaID: obj.ID,
 	}
 	if err := h.DB.Create(&payment).Error; err != nil {
