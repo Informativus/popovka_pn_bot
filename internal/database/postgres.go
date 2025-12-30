@@ -23,7 +23,7 @@ func ConnectPostgres(cfg *config.Config) (*gorm.DB, error) {
 	log.Println("Connected to PostgreSQL")
 
 	// Auto Migrate
-	err = db.AutoMigrate(&models.User{}, &models.Subscription{}, &models.Payment{})
+	err = db.AutoMigrate(&models.User{}, &models.Subscription{}, &models.Payment{}, &models.ReferralTransaction{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to migrate database: %w", err)
 	}
