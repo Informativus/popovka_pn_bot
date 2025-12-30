@@ -9,6 +9,7 @@ import (
 	"popovka-bot/internal/database"
 	"popovka-bot/internal/payment"
 	"popovka-bot/internal/remnawave"
+	"popovka-bot/internal/worker"
 )
 
 func main() {
@@ -36,13 +37,13 @@ func main() {
 	paymentClient := payment.NewClient(cfg.YookassaShopID, cfg.YookassaKey)
 
 	// Initialize Bot
-	tgBot, err := bot.NewBot(cfg.BotToken, paymentClient, db)
+	tgBot, err := bot.NewBot(cfg.BotToken, paymentClient, remnawaveClient, db)
 	if err != nil {
 		log.Fatalf("Could not initialize bot: %v", err)
 	}
 
 	// Initialize Handler
-	paymentHandler := payment.NewHandler(remnawaveClient, db, tgBot.Instance)
+	paymentHandler := payment.NewHandler(remnawaveClient, db, tgBot.Instance, cfg.RemnawaveSquadID)
 
 	// Start Webhook Server
 	go func() {
@@ -52,6 +53,10 @@ func main() {
 			log.Fatalf("Webhook server failed: %v", err)
 		}
 	}()
+
+	// Start Background Checker
+	checker := worker.NewChecker(db, rdb, remnawaveClient, tgBot.Instance)
+	go checker.Start()
 
 	log.Println("Service started successfully")
 

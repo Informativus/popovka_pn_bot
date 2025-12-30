@@ -9,6 +9,7 @@ import (
 
 	"popovka-bot/internal/models"
 	"popovka-bot/internal/payment"
+	"popovka-bot/internal/remnawave"
 
 	"github.com/mymmrac/telego"
 	th "github.com/mymmrac/telego/telegohandler"
@@ -17,21 +18,23 @@ import (
 )
 
 type Bot struct {
-	Instance      *telego.Bot
-	PaymentClient *payment.Client
-	DB            *gorm.DB
+	Instance        *telego.Bot
+	PaymentClient   *payment.Client
+	RemnawaveClient *remnawave.Client
+	DB              *gorm.DB
 }
 
-func NewBot(token string, paymentClient *payment.Client, db *gorm.DB) (*Bot, error) {
+func NewBot(token string, paymentClient *payment.Client, remnawaveClient *remnawave.Client, db *gorm.DB) (*Bot, error) {
 	tgBot, err := telego.NewBot(token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bot: %w", err)
 	}
 
 	return &Bot{
-		Instance:      tgBot,
-		PaymentClient: paymentClient,
-		DB:            db,
+		Instance:        tgBot,
+		PaymentClient:   paymentClient,
+		RemnawaveClient: remnawaveClient,
+		DB:              db,
 	}, nil
 }
 
@@ -163,6 +166,27 @@ func (b *Bot) Start() {
 		}
 
 		msg := fmt.Sprintf("👤 *Твой профиль:*\n\n🔹 ID: `%d`\n🔹 Статус: %s\n🔹 Действует до: %s", telegramID, status, expiry)
+
+		// Add VPN link if subscription is active
+		if err == nil {
+			if sub.SubscriptionURL == "" && sub.RemnawaveID != "" {
+				// URL missing in DB (legacy record), try to fetch it
+				rwUser, err := b.RemnawaveClient.GetUser(sub.RemnawaveID)
+				if err != nil {
+					log.Printf("Failed to fetch user %s from Remnawave: %v", sub.RemnawaveID, err)
+				} else {
+					// Update DB
+					sub.SubscriptionURL = rwUser.SubscriptionURL
+					if err := b.DB.Save(&sub).Error; err != nil {
+						log.Printf("Failed to update subscription URL in DB: %v", err)
+					}
+				}
+			}
+
+			if sub.SubscriptionURL != "" {
+				msg += fmt.Sprintf("\n\n🔗 *Твоя ссылка на VPN:*\n%s", sub.SubscriptionURL)
+			}
+		}
 
 		_, _ = ctx.Bot().SendMessage(ctx.Context(), tu.Message(tu.ID(telegramID), msg).WithParseMode(telego.ModeMarkdown))
 		_ = ctx.Bot().AnswerCallbackQuery(ctx.Context(), tu.CallbackQuery(callback.ID))

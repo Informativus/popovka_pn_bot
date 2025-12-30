@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"popovka-bot/internal/models"
 	"popovka-bot/internal/remnawave"
@@ -20,13 +21,15 @@ type Handler struct {
 	RemnawaveClient *remnawave.Client
 	DB              *gorm.DB
 	Bot             *telego.Bot
+	SquadID         string
 }
 
-func NewHandler(remnawaveClient *remnawave.Client, db *gorm.DB, bot *telego.Bot) *Handler {
+func NewHandler(remnawaveClient *remnawave.Client, db *gorm.DB, bot *telego.Bot, squadID string) *Handler {
 	return &Handler{
 		RemnawaveClient: remnawaveClient,
 		DB:              db,
 		Bot:             bot,
+		SquadID:         squadID,
 	}
 }
 
@@ -85,6 +88,7 @@ func (h *Handler) processSuccess(obj WebhookObject) error {
 	}
 
 	var rwID string
+	var configLink string // Store subscription URL
 
 	// 2. Check if subscription exists
 	var sub models.Subscription
@@ -93,18 +97,32 @@ func (h *Handler) processSuccess(obj WebhookObject) error {
 	if result.Error == gorm.ErrRecordNotFound {
 		// New Subscription -> Create User in Remnawave
 		log.Printf("Creating new Remnawave user for TelegramID: %d", telegramID)
-		rwUser, err := h.RemnawaveClient.CreateUser(telegramID, fmt.Sprintf("user_%d", telegramID))
+
+		// Parse duration (e.g., "30d" -> 30)
+		durationDays := 30 // default
+		if len(durationStr) > 1 && durationStr[len(durationStr)-1] == 'd' {
+			if days, err := strconv.Atoi(durationStr[:len(durationStr)-1]); err == nil {
+				durationDays = days
+			}
+		}
+
+		rwUser, err := h.RemnawaveClient.CreateUser(telegramID, fmt.Sprintf("user_%d", telegramID), durationDays, h.SquadID)
 		if err != nil {
 			return fmt.Errorf("remnawave create user error: %w", err)
 		}
 
-		rwID = rwUser.ID
+		rwID = rwUser.UUID
+		configLink = rwUser.SubscriptionURL // Save subscription URL from response
+		log.Printf("DEBUG: Created user with UUID: '%s', SubscriptionURL: '%s'", rwID, configLink)
 
 		// Create Subscription record
+		expireDate := time.Now().Add(time.Duration(durationDays) * 24 * time.Hour)
 		newSub := models.Subscription{
-			UserID:      user.ID,
-			RemnawaveID: rwUser.ID,
-			PlanType:    "standard", // Default plan
+			UserID:          user.ID,
+			RemnawaveID:     rwUser.UUID,
+			SubscriptionURL: rwUser.SubscriptionURL, // Save subscription URL
+			ExpirationDate:  expireDate,
+			PlanType:        "standard", // Default plan
 		}
 		if err := h.DB.Create(&newSub).Error; err != nil {
 			return fmt.Errorf("failed to save subscription: %w", err)
@@ -114,8 +132,23 @@ func (h *Handler) processSuccess(obj WebhookObject) error {
 		rwID = sub.RemnawaveID
 		// Existing Subscription -> Extend
 		log.Printf("Extending subscription for RemnawaveID: %s", sub.RemnawaveID)
-		if err := h.RemnawaveClient.ExtendSubscription(sub.RemnawaveID, durationStr); err != nil {
+
+		// Parse duration
+		durationDays := 30
+		if len(durationStr) > 1 && durationStr[len(durationStr)-1] == 'd' {
+			if days, err := strconv.Atoi(durationStr[:len(durationStr)-1]); err == nil {
+				durationDays = days
+			}
+		}
+
+		if err := h.RemnawaveClient.ExtendSubscription(sub.RemnawaveID, durationDays); err != nil {
 			return fmt.Errorf("remnawave extend error: %w", err)
+		}
+
+		// Update subscription expiration date in DB
+		newExpireDate := time.Now().Add(time.Duration(durationDays) * 24 * time.Hour)
+		if err := h.DB.Model(&sub).Update("expiration_date", newExpireDate).Error; err != nil {
+			log.Printf("Failed to update subscription expiration date: %v", err)
 		}
 	} else {
 		return fmt.Errorf("db error checking subscription: %w", result.Error)
@@ -134,16 +167,22 @@ func (h *Handler) processSuccess(obj WebhookObject) error {
 	}
 
 	// 4. Notify User
-	configLink, err := h.RemnawaveClient.GetConfig(rwID)
-	if err != nil {
-		log.Printf("Failed to get config link for user %d: %v", telegramID, err)
-		_, _ = h.Bot.SendMessage(context.Background(), tu.Message(tu.ID(telegramID), "✅ Оплата прошла успешно! Но возникла проблема при получении ссылки на конфиг. Напишите в поддержку."))
-		return nil // Still success for YooKassa
+	log.Printf("DEBUG: rwID value: '%s', configLink: '%s'", rwID, configLink)
+
+	// If we don't have configLink yet (for existing subscriptions), get it from DB
+	if configLink == "" {
+		var sub models.Subscription
+		if err := h.DB.Where("remnawave_id = ?", rwID).First(&sub).Error; err != nil {
+			log.Printf("Failed to get subscription for user %d: %v", telegramID, err)
+			_, _ = h.Bot.SendMessage(context.Background(), tu.Message(tu.ID(telegramID), "✅ Оплата прошла успешно! Но возникла проблема при получении ссылки на конфиг. Напишите в поддержку."))
+			return nil // Still success for YooKassa
+		}
+		configLink = sub.SubscriptionURL
 	}
 
 	_, _ = h.Bot.SendMessage(context.Background(), tu.Message(
 		tu.ID(telegramID),
-		fmt.Sprintf("✅ Оплата прошла успешно!\n\nТвоя ссылка на VPN:\n`%s`\n\nПриятного пользования!", configLink),
+		fmt.Sprintf("✅ Оплата прошла успешно!\n\nТвоя ссылка на VPN:\n%s\n\nПриятного пользования!", configLink),
 	))
 
 	return nil

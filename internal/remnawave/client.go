@@ -62,58 +62,73 @@ func (c *Client) doRequest(method, endpoint string, body interface{}) ([]byte, e
 	return respBody, nil
 }
 
-func (c *Client) CreateUser(telegramID int64, username string) (*UserResponse, error) {
-	reqBody := CreateUserRequest{
-		TelegramID: telegramID,
-		Username:   username,
+func (c *Client) CreateUser(telegramID int64, username string, durationDays int, squadID string) (*UserResponse, error) {
+	// Calculate expiration date
+	expireAt := time.Now().Add(time.Duration(durationDays) * 24 * time.Hour)
+
+	squads := []string{}
+	if squadID != "" {
+		squads = append(squads, squadID)
 	}
 
-	resp, err := c.doRequest("POST", "/users", reqBody)
+	reqBody := CreateUserRequest{
+		Username:             fmt.Sprintf("tg_%d", telegramID),
+		Status:               "ACTIVE",
+		TrafficLimitBytes:    0,
+		TrafficLimitStrategy: "NO_RESET",
+		ExpireAt:             expireAt.Format(time.RFC3339),
+		Description:          fmt.Sprintf("Telegram User: %s (ID: %d)", username, telegramID),
+		ActiveInternalSquads: squads,
+	}
+
+	resp, err := c.doRequest("POST", "/api/users/", reqBody)
 	if err != nil {
 		return nil, err
 	}
 
-	var user UserResponse
-	if err := json.Unmarshal(resp, &user); err != nil {
+	var apiResp APIResponse
+	if err := json.Unmarshal(resp, &apiResp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
 
-	return &user, nil
+	// Debug logging
+	fmt.Printf("DEBUG Remnawave CreateUser response: UUID='%s', Username='%s', Status='%s'\n", apiResp.Response.UUID, apiResp.Response.Username, apiResp.Response.Status)
+
+	return &apiResp.Response, nil
 }
 
-func (c *Client) GetConfig(remnawaveID string) (string, error) {
-	resp, err := c.doRequest("GET", fmt.Sprintf("/users/%s/config", remnawaveID), nil)
-	if err != nil {
-		return "", err
-	}
+func (c *Client) ExtendSubscription(remnawaveID string, durationDays int) error {
+	// Calculate new expiration date
+	expireAt := time.Now().Add(time.Duration(durationDays) * 24 * time.Hour)
 
-	// Assuming the API returns the config string directly or a JSON with a config field.
-	// Based on typical behavior, let's assume it returns a JSON object with a "config" field.
-	var result struct {
-		Config string `json:"config"`
-	}
-	if err := json.Unmarshal(resp, &result); err != nil {
-		// If unmarshal fails, maybe it returned raw text?
-		return string(resp), nil
-	}
-
-	if result.Config == "" {
-		return string(resp), nil
-	}
-
-	return result.Config, nil
-}
-
-func (c *Client) ExtendSubscription(remnawaveID string, duration string) error {
 	reqBody := ExtendSubscriptionRequest{
-		Duration: duration,
+		ExpireAt: expireAt.Format(time.RFC3339),
 	}
 
-	_, err := c.doRequest("POST", fmt.Sprintf("/users/%s/extend", remnawaveID), reqBody)
+	_, err := c.doRequest("POST", fmt.Sprintf("/api/users/%s/extend", remnawaveID), reqBody)
 	return err
 }
 
 func (c *Client) DeleteUser(remnawaveID string) error {
 	_, err := c.doRequest("DELETE", fmt.Sprintf("/users/%s", remnawaveID), nil)
 	return err
+}
+
+func (c *Client) DisableUser(remnawaveID string) error {
+	_, err := c.doRequest("POST", fmt.Sprintf("/users/%s/actions/disable", remnawaveID), nil)
+	return err
+}
+
+func (c *Client) GetUser(remnawaveID string) (*UserResponse, error) {
+	resp, err := c.doRequest("GET", fmt.Sprintf("/api/users/%s", remnawaveID), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var apiResp APIResponse
+	if err := json.Unmarshal(resp, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	return &apiResp.Response, nil
 }
